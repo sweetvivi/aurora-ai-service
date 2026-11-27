@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------- build output
+target/
+build/
+out/
+*.class
+*.jar
+*.war
+*.ear
+*.hprof
+
+# ---------------------------------------------------------------- runtime data
+# Local blob store written by LocalFileStorage (app.storage.local-root).
+data/
+# Root-only local config dir (do not ignore src/.../config packages).
+/config/
+logs/
+*.log
+
+# ---------------------------------------------------------------- secrets and local configuration
+# Local tool configuration: machine specific, and .mcp.json carries a database password.
+.claude/
+.mcp.json
+# Environment files holding credentials. Keep the committed defaults in
+# application.yml / application-mysql.yml; anything per-machine goes here.
+.env
+.env.*
+!.env.example
+# Local Flyway CLI config (often carries DB password).
+flyway-local.conf
+
+# ---------------------------------------------------------------- IDE and OS
+# Local Cursor rules/hooks only; do not commit agent tooling.
+.cursor/
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------- tooling leftovers
+.workbuddy/
+# Ad-hoc video probe scripts, JSON payloads and sample clips. Scratch work from model
+# experiments, never part of the build.
+.tmp-video-probe/
+
+# Deliberately NOT ignored: *.yaml / *.yml. Application and compose configuration is
+# part of the repository; a blanket rule silently swallows new config files.
+
+# Local database dumps taken before migrations; never commit these.
+tools/backup/
+
+# Vitest 缓存目录（历史测试工具留下，非本工程依赖）
+node_modules/
+
+# 浏览器自动化实例误落进仓库的 user-data-dir
+hub.tmp-*/

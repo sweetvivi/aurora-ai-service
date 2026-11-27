@@ -1,0 +1,573 @@
+server:
+  port: ${SERVER_PORT:8080}
+  # 前端镜像里的 nginx 把 /api 代理到 backend:8080，后端看到的 TCP 对端永远是 nginx 容器的
+  # 内网地址。不还原真实客户端地址，注册/发码/取图这些按 IP 的限流就会退化成「全站共用一个配额」。
+  # native = Tomcat RemoteIpValve：只在直连对端属于内网段时才解析 X-Forwarded-For，并从右往左
+  # 取第一个非内网地址，客户端伪造的左侧条目会被丢掉；公网直连时对端不是内网，头部直接忽略。
+  # 它与应用层的 app.security.trust-forwarded-for 是两条独立通道，后者保持关闭（取最左值，可伪造）。
+  forward-headers-strategy: native
+  tomcat:
+    remoteip:
+      # RemoteIpValve 默认把 10/8、192.168/16、172.16/12 统统当成「内部代理」，于是**内网访客**
+      # （例如 10.0.0.x）也会被误判成代理，XFF 不被采纳，全站又落回同一个限流键。
+      # 这里只信任 Docker 的 172.16-31 段（hub-test_edge 是 172.21.0.0/16）与回环地址；
+      # 若部署换了宿主机网段（如 10.x），必须同步修改，否则会退化成「全站共用一个配额」。
+      internal-proxies: '127\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}'
+
+spring:
+  application:
+    name: backend-service
+  profiles:
+    # Local runs are persistent by default. Tests activate the test profile explicitly and keep
+    # using the in-memory datasource below, so a test run can never erase the local backend DB.
+    default: mysql
+  datasource:
+    url: jdbc:h2:mem:backend;MODE=MySQL;DB_CLOSE_DELAY=-1
+    username: sa
+
+
+    password:
+    driver-class-name: org.h2.Driver
+    # 连接池容量：以前完全吃 Hikari 默认的 10，压测三档 10/30/50 并发下
+    # hikaricp.connections.active 长停 10/10、pending 0→20→40 线性增长，吞吐钉在
+    # 550→587→562 RPS（p50 12.6→73.9ms）——说明瓶颈是池，不是 Tomcat 也不是上游。
+    #
+    # 28 的来历：
+    #  - Tomcat 默认 max-threads=200，一个请求同时最多占 1 条连接；
+    #  - 第 1 项把 blob 落盘移出事务后，连接只被毫秒级的 SQL 占住（p50 请求 12.6ms 里 DB 只是一段），
+    #    按「并发请求里约一成到一成半正处在 DB 调用中」估，200×15%≈30，取 28 留一点余量；
+    #  - MySQL @@max_connections=200，本服务只占 28（约 14%），不把压力转嫁给数据库；
+    #  - minimum-idle 压到 8：峰值能涨到 28，闲时不必常驻 28 条连接（Hikari 默认 minimum-idle
+    #    等于 maximum-pool-size，会一直占满）。
+    # connection-timeout 5s（默认 30s）：池真被占满时尽快失败，而不是把 200 个 Tomcat 线程
+    # 一起挂在 30 秒的等待上，把小抖动放大成全站排队。
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:28}
+      minimum-idle: ${DB_POOL_MIN_IDLE:8}
+      connection-timeout: 5000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: create-drop
+  h2:
+    console:
+      enabled: false
+  flyway:
+    enabled: false
+  # 跨实例共享状态用的 Redis。只有 app.redis.enabled=true 时才会真正连它：
+  # 连接工厂是懒加载的，单实例部署（enabled=false）连不上也不会影响启动。
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:0}
+      # 默认超时是 60s，Redis 抖动时会把请求线程一起挂住；限流不该成为新的阻塞点。
+      # 1s 足够本地/同机房的 Redis 往返（实测亚毫秒），又能把最坏卡顿限制在可接受范围。
+      timeout: ${REDIS_TIMEOUT:1s}
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:1s}
+      repositories:
+        # 只用 RedisTemplate，不用 Spring Data Redis 的仓储。不关掉的话，它会扫到一堆 JPA
+        # 仓储接口并逐个打「Could not safely identify store assignment」的警告。
+        enabled: false
+  task:
+    scheduling:
+      # 定时任务默认只有一个线程。视频轮询一轮要打十几次上游（单个任务可能卡到分钟级），
+      # 目录同步就会一直排在后面，看起来像「同步坏了」；这里显式给一个命名且可并发的调度池。
+      # 现有 4 个任务共用它：视频轮询、目录同步、PPT 恢复扫描、任务队列派发。
+      # 视频轮询可能长时间占住一个线程，所以再多留两格 —— 队列派发每 2 秒一轮，被排在
+      # 一分钟的轮询后面就等于停摆。
+      scheduler-name: hub-scheduler
+      thread-name-prefix: hub-scheduler-
+      pool:
+        size: ${SCHEDULING_POOL_SIZE:6}
+      shutdown:
+        await-termination: true
+        await-termination-period: 20s
+  servlet:
+    multipart:
+      # Kept slightly above app.storage.max-file-size so that oversized uploads fail with our own
+      # 413 message instead of a container level error.
+      # The larger ceiling also covers AI Canvas assets; other upload services still enforce their
+      # own, smaller business limits.
+      max-file-size: ${MULTIPART_MAX_FILE_SIZE:205MB}
+      max-request-size: ${MULTIPART_MAX_REQUEST_SIZE:210MB}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # prometheus 给抓取端用（队列积压等指标），其余三个是运维手查用的
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  health:
+    # Redis 是可选依赖：spring-boot-starter-data-redis 只要在类路径上就会注册 RedisHealthIndicator，
+    # 连不上时 /actuator/health 恒为 DOWN(503)。而 Dockerfile / docker-compose 的 healthcheck 打的
+    # 正是这个端点 —— 单实例部署本来就没有 Redis（app.redis.enabled=false），会被永久判成不健康，
+    # 部署脚本据此自动回滚，看起来像「新版本起不来」。所以让健康检查跟随开关：没启用就不检查它。
+    redis:
+      enabled: ${app.redis.enabled:false}
+
+springdoc:
+  # The console is Knife4j at /doc.html, served straight from its webjar. Only the document itself
+  # comes from springdoc here; the bootstrap endpoint Knife4j asks for
+  # (/v3/api-docs/swagger-config) is served by SwaggerConfigEndpoint, so that the Swagger UI
+  # artifact can stay off the classpath. See pom.xml and that class for why.
+  api-docs:
+    path: /v3/api-docs
+
+app:
+  request-log:
+    # 一次 HTTP 请求一行的访问日志，落到 request_logs 表（V98）。
+    # 关闭后过滤器直接放行，不产生 ThreadLocal 与队列开销；压测或数据库故障时用得上。
+    enabled: ${REQUEST_LOG_ENABLED:true}
+    # 请求体落库上限。超过即截断并标注，避免大报文把 TEXT 列和队列内存撑满。
+    max-body-length: ${REQUEST_LOG_MAX_BODY:8192}
+    # 待写队列容量。满了丢弃并记数，绝不让日志反压业务线程（连接池只有 28 条，见下方 datasource 注释）。
+    queue-capacity: ${REQUEST_LOG_QUEUE:8192}
+    # 单批写入行数：把 N 次往返压成 1 次，是控制写入成本的主要手段。
+    batch-size: ${REQUEST_LOG_BATCH:100}
+    # 保留 7 天，超期由清理任务物理删除（DELETE，非软删除）。
+    # 注意：这里只影响访问日志；关键数据变更审计是另一张表，默认保留 180 天。
+    retention-days: ${REQUEST_LOG_RETENTION_DAYS:7}
+  # SQL 日志。默认关闭，本地开发用 .env 里的 SQL_LOG_ENABLED=true 打开。
+  # 上线前务必确认它是 false：绑定参数会原样输出，用户对话内容、手机号都会进文件，
+  # 而这一层在脱敏器之下（Hibernate 直接写 logger），不受 SensitiveMasker 保护。
+  sql-log:
+    enabled: ${SQL_LOG_ENABLED:false}
+    # 是否输出绑定参数（? → 实际值）。关掉只剩语句，参数位置要靠 SQL 里出现的字段猜。
+    bind-values: ${SQL_LOG_BIND_VALUES:true}
+    # 是否输出结果集取值。只在排查「取出来的值不对」时开，量非常大。
+    result-values: ${SQL_LOG_RESULT_VALUES:false}
+    # 是否连手写 JdbcTemplate 语句一起输出（日志表批量写入、报表查询）。
+    jdbc-template: ${SQL_LOG_JDBC_TEMPLATE:false}
+    # 语句换行缩进。关掉后一条多表 JOIN 是一整行，肉眼基本没法读。
+    format: ${SQL_LOG_FORMAT:true}
+  # 关键数据变更审计。默认开启，生产也不建议关：余额、模型上下架、删除这类操作
+  # 事后必须能回答「谁改的、改前是多少」。
+  audit-log:
+    enabled: ${AUDIT_LOG_ENABLED:true}
+    # before/after 快照的落库上限，批量操作一次可能改上百行。
+    max-snapshot-length: ${AUDIT_LOG_MAX_SNAPSHOT:8192}
+    queue-capacity: ${AUDIT_LOG_QUEUE:4096}
+    batch-size: ${AUDIT_LOG_BATCH:50}
+    # 保留 180 天：财务与合规追溯通常按季度起算，比访问日志长得多。
+    retention-days: ${AUDIT_LOG_RETENTION_DAYS:180}
+    # 启动时扫描「管理端写接口漏加 @AuditLog」并打 WARN 清单。
+    warn-missing-annotations: ${AUDIT_LOG_WARN_MISSING:true}
+  # 控制台日志级别。本项目本地与生产都用 mysql profile，没法用 profile 名区分环境，
+  # 所以控制台是否输出由这个值决定：容器里设 OFF 即静音（日志仍在文件/表里）。
+  log:
+    console-level: ${LOG_CONSOLE_LEVEL:DEBUG}
+  admin:
+    # Fixed local management key. Deployments can override it with ADMIN_API_KEY.
+    api-key: ${ADMIN_API_KEY:dev-only-change-me}
+  llm:
+    # OpenAI compatible gateway. A service-wide upstream key is optional because user requests use
+    # account relay credentials; if the legacy host credential is needed, supply APP_LLM_API_KEY.
+    # The relay entry point is the same New API host as app.new-api.base-url, differing only by the
+    # /v1 suffix, so it is derived from NEW_API_BASE_URL unless LLM_BASE_URL overrides it. Set
+    # LLM_BASE_URL only when model traffic leaves through a different origin than the management API
+    # (separate CDN / reverse proxy), or when app.new-api.enabled=false points straight at a supplier.
+    base-url: ${LLM_BASE_URL:${NEW_API_BASE_URL:}/v1}
+    default-model: ${LLM_DEFAULT_MODEL:deepseek-v4.1-flash}
+    # false：目录未登记的 model key 直接 404，禁止透传上游（防成本与运营风险）
+    allow-unlisted-models: ${LLM_ALLOW_UNLISTED_MODELS:false}
+    chat-completions-path: /chat/completions
+    connect-timeout: 10s
+    read-timeout: 120s
+    images-path: /images/generations
+    models-path: /models
+    # 默认值指向**版本回退组**（V68 种子）而不是具体模型：组里有多成员时，
+    # 不指定模型的调用（抠图/超清/消除/局部重绘）才能走上回退链；
+    # 指向具体 key 会让这些调用绕过整个组，组里加多少成员都不生效。
+    # 组 key 也比具体 key 耐久：换模型版本是改组内成员，不用改配置。
+    image-model: ${LLM_IMAGE_MODEL:gpt-image-2.0}
+    # Optional: gateways often scope a key to one model group, so the chat key can answer
+    # chat/completions but return model_not_found for an image model. Blank = reuse api-key.
+    image-api-key: ${APP_LLM_IMAGE_API_KEY:}
+    image-timeout: 4m
+    # Video generation is asynchronous: submit returns a task id, then poll. Auth is the caller's
+    # New API relay key (same as chat/image). New API task plugins (xAI / Doubao / …) own the
+    # upstream hop via the openai_video surface:
+    #   POST /v1/videos  →  GET /v1/videos/{id}  (or plugin-native status path below)
+    videos-path: ${LLM_VIDEO_PATH:/videos}
+    # Prefer the plugin-native poll path: unified GET /v1/videos/{id} often has status only,
+    # while GET /xai/v1/videos/{id} carries the finished file URL for the xAI task plugin.
+    # Other vendors can override (e.g. blank to reuse /videos).
+    video-status-path: ${LLM_VIDEO_STATUS_PATH:/xai/v1/videos}
+    # Legacy absolute origin for relative status URLs when New API is off. With New API on,
+    # finished bytes are fetched via {base}{videos-path}/{provider_task_id}/content — leave blank.
+    video-result-base-url: ${LLM_VIDEO_RESULT_BASE_URL:}
+    # Fallback only. Prefer llm_providers.video_download_api_key (survives catalogue sync).
+    # With New API relay on, content is fetched by the caller's token — leave this blank.
+    video-download-api-key: ${LLM_VIDEO_DOWNLOAD_API_KEY:}
+    video-model: ${LLM_VIDEO_MODEL:grok-imagine-video}
+    video-timeout: 2m
+    # 成片下载单独计时：上游首次取片要从冷存储拉流，可能远超提交/查询的超时。
+    video-download-timeout: ${LLM_VIDEO_DOWNLOAD_TIMEOUT:10m}
+    # 参考图上传换取公网链接（多数供应商只认 https 图片，data URL 会被忽略或拒收）。
+    # 留空则退回内联 data URL。
+    video-upload-url: ${LLM_VIDEO_UPLOAD_URL:}
+    video-upload-api-key: ${LLM_VIDEO_UPLOAD_API_KEY:}
+    # 参考图模式下额外补发 input_reference 的模型（逗号分隔），默认空。
+    # input_reference 在 OpenAI Videos 契约里是「从哪一帧开始」，不是参考图：xAI 任务插件会把它
+    # 原样提升成 image，名单里多写一个 grok 模型，参考图模式就会退化成首帧模式。
+    # 只有所在通道的插件确实只认它（sora / oai_videos 会丢掉 reference_images、image_urls
+    # 与 content[]）才填，并且要接受该模型没有真正的参考图模式。
+    video-input-reference-models: ${LLM_VIDEO_INPUT_REFERENCE_MODELS:}
+    # Optional, unverified OpenAI-compatible transcription route. Configure only after the relay
+    # audio endpoint has been confirmed; a blank model keeps transcription disabled.
+    audio-transcriptions-path: ${LLM_AUDIO_TRANSCRIPTIONS_PATH:/audio/transcriptions}
+    audio-transcription-model: ${LLM_AUDIO_TRANSCRIPTION_MODEL:}
+  video:
+    # A sweep, not a timer per job: every cycle looks at tasks whose state is stale, so a restart
+    # resumes polling from the database instead of losing the in-flight jobs.
+    poll-interval: 5s
+    task-timeout: 25m
+    max-concurrent-per-user: 2
+    poll-batch-size: 50
+  site:
+    # Site resolution: app-name header -> Host mapped through app_sites.domain -> this default.
+    default-key: default
+    site-header: app-name
+    domain-fallback: true
+    # Baseline feature switches; app_site_settings rows of the resolved site override them.
+    default-features:
+      chat: true
+      stream: true
+      attachment: false
+      share: false
+      points: false
+  security:
+    # Production identity comes from the Bearer access token. A client may additionally select an
+    # account through this header only while the development flag is enabled. The header is client
+    # supplied and is NOT an authorisation mechanism, so keep this false outside local development.
+    trust-user-header: ${TRUST_USER_HEADER:false}
+    user-header: X-User-Id
+    # X-Forwarded-For is client supplied unless a proxy overwrites it, so it is ignored by default.
+    # It feeds the registration rate limit key: enabling it without a trusted proxy in front would
+    # let a script rotate the header and never hit the limit.
+    trust-forwarded-for: false
+    # Account that owns resources created without an explicit identity.
+    default-username: demo
+  rate-limit:
+    enabled: true
+    # Bound on tracked keys, so a flood of distinct addresses cannot grow memory without limit.
+    max-tracked-keys: 100000
+    # 注册：15 秒窗口内只放行 1 次尝试。
+    # 时限压到 15 秒是有意的，与「访客从哪来」无关：直连后端时限流键是访客自己的地址，
+    # 经前端 nginx 转发时所有请求共用 nginx 容器的内网地址（app.security.trust-forwarded-for
+    # 默认关闭），两种情况下等待上限都只有 15 秒，不会再出现「请 1515 秒后再试」。
+    registration:
+      max-attempts-per-ip: 1
+      window: 15s
+    # 发邮箱验证码：站点自己不发信，但上游 SMTP 与对方收件箱都是有成本的资源。
+    # IP 与邮箱各算一份：只卡 IP 挡不住换邮箱的脚本，只卡邮箱挡不住分布式轰炸一个人。
+    email-code:
+      max-per-ip: ${EMAIL_CODE_RATE_LIMIT_PER_IP:10}
+      max-per-email: ${EMAIL_CODE_RATE_LIMIT_PER_EMAIL:3}
+      window: 10m
+    # 出图按账号限「张」，不是按请求：一次可以要 4 张。24 张/分钟 = 连点 6 次 4 张，
+    # 正常用户够用，脚本刷不动。余额闸门挡的是「没钱」，这里挡的是「刷太快」。
+    image:
+      max-images-per-user: ${IMAGE_RATE_LIMIT_PER_MINUTE:24}
+      window: 1m
+  # Image captcha on registration. The per address limit alone only slows a single script down;
+  # the captcha adds a cost that does not depend on where the request comes from.
+  captcha:
+    enabled: ${CAPTCHA_ENABLED:true}
+    length: 4
+    # Long enough to type, short enough that a farmed image is not useful for long.
+    ttl: 5m
+    # Bound on stored challenges: this map is per instance and has no Redis behind it yet.
+    max-stored: 10000
+    # Issuing costs a PNG render, so the image endpoint has its own ceiling per address.
+    max-issues-per-ip: 120
+    issue-window: 1h
+  auth:
+    # Signing key of the access token. No repository default is provided: the service refuses to
+    # start unless AUTH_JWT_SECRET supplies at least 32 bytes.
+    jwt-secret: ${AUTH_JWT_SECRET:}
+    issuer: backend-service
+    # Access tokens are short lived because they cannot be revoked individually; the session row
+    # behind them is re-checked on every request, so sign out still takes effect at once.
+    access-token-ttl: 30m
+    refresh-token-ttl: 30d
+    # Legacy BCrypt work factor, used only when verifying hashes created before Argon2id.
+    bcrypt-strength: 12
+    # Argon2id parameters. The defaults are the OWASP minimum for interactive login.
+    argon2-salt-length: 16
+    argon2-hash-length: 32
+    argon2-parallelism: 1
+    argon2-memory-kb: 19456
+    argon2-iterations: 2
+    # Whether a name New API accepts may open an account here on first sign in (the name is the
+    # shared identity in both directions). Turn off to require a local registration first.
+    new-api-account-provisioning-enabled: ${AUTH_NEW_API_ACCOUNT_PROVISIONING_ENABLED:true}
+    # Whether registering here also creates the New API account, through the public sign-up endpoint
+    # the New API page itself uses (no administrator token). Registration fails rather than leaving
+    # a local account with no New API identity, because every AI call signs in with the user's own
+    # credentials. Needs open registration upstream; if New API also requires email verification,
+    # this site cannot sign up on the user's behalf.
+    new-api-registration-enabled: ${AUTH_NEW_API_REGISTRATION_ENABLED:true}
+    # 邮箱验证归 New API 所有：本站没有发信能力，也不保存验证码。这里只决定两件事。
+    email-verification:
+      # 注册是否必须带「上游验证过的邮箱」。
+      #   AUTO（默认）跟随 New API 的 GET /api/status → email_verification，上下游开关天然同步；
+      #   ON          总是要求，上游不配合时注册返回 503；
+      #   OFF         永不要求，即使上游已开启（此时上游会拒绝，表现为 503）。
+      register-mode: ${AUTH_EMAIL_VERIFICATION_REGISTER_MODE:AUTO}
+      # 登录是否要求账号邮箱已验证。
+      # 默认 false：开关出现之前的存量账号 email_verified 全是 false，直接打开会把所有人锁在门外。
+      # 打开前先按 docs/newapi-deployment-checklist.md §5 补齐存量数据。
+      login-requires-verified-email: ${AUTH_EMAIL_VERIFICATION_LOGIN_REQUIRED:false}
+  chat:
+    persistence-enabled: true
+    stream-timeout: 5m
+    title-max-length: 60
+    # A stopped generation stays cancellable for this long, which makes the stop button idempotent
+    # when it is pressed just as the answer completes.
+    request-retention: 2m
+    max-tracked-requests: 10000
+    # 默认关闭：生图由模型自己调 generate_image 工具完成。只有当某个中转渠道不转发
+    # tools、模型永远拿不到工具时才打开；打开后服务端会用正则猜「这句话是不是要画图」，
+    # 有误判风险（例如「帮我写一段生图提示词」）。
+    image-intent-fallback: ${CHAT_IMAGE_INTENT_FALLBACK:false}
+  # Chat/Agent 联网走上游原生 tools:[{type:"web_search"}]，由 llm_models.supports_web_search
+  # 门控；不需要 WEB_SEARCH_* / Bocha / Tavily。遗留 WebSearchTool 读 Java 默认空配置，未启用。
+  storage:
+    # 单账号附件总量上限：出图/修图/聊天附件都算在内。0 表示不限制。
+    max-user-bytes: ${STORAGE_MAX_USER_BYTES:2GB}
+    # local-root is the development blob store. Swap LocalFileStorage for an S3/MinIO adapter
+    # without touching modules/file: the port is infra/storage/FileStorage.
+    local-root: ${STORAGE_LOCAL_ROOT:./data/uploads}
+    # 公开素材目录（工具图标、案例图），映射到 /media/**，可匿名读取。
+    # 与 local-root 分开是有意的：附件是私有的，素材要出现在前台页面上。
+    public-root: ${STORAGE_PUBLIC_ROOT:./data/public}
+    max-file-size: 100MB
+    allowed-content-types:
+      - image/png
+      - image/jpeg
+      - image/gif
+      - image/webp
+      - image/bmp
+      - audio/mpeg
+      - audio/mp3
+      - audio/wav
+      - audio/x-wav
+      - audio/wave
+      - audio/mp4
+      - audio/x-m4a
+      - audio/ogg
+      - application/ogg
+      - audio/webm
+      # Generated videos are stored as ordinary attachments under /api/v1/files/{id}/content.
+      - video/mp4
+      - video/webm
+      - application/pdf
+      - text/plain
+      - text/markdown
+      - text/csv
+      - application/json
+      - application/msword
+      - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+      - application/vnd.ms-excel
+      - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+      - application/vnd.openxmlformats-officedocument.presentationml.presentation
+    allowed-extensions:
+      - png
+      - jpg
+      - jpeg
+      - gif
+      - webp
+      - bmp
+      - mp3
+      - wav
+      - m4a
+      - ogg
+      - mp4
+      - webm
+      - pdf
+      - txt
+      - md
+      - csv
+      - json
+      - doc
+      - docx
+      - xls
+      - xlsx
+      - pptx
+  ai-canvas:
+    max-asset-size: ${AI_CANVAS_MAX_ASSET_SIZE:200MB}
+    user-storage-quota: ${AI_CANVAS_USER_STORAGE_QUOTA:5GB}
+    video-timeout: ${AI_CANVAS_VIDEO_TIMEOUT:10m}
+    video-download-timeout: ${AI_CANVAS_VIDEO_DOWNLOAD_TIMEOUT:60s}
+    ffmpeg-command: ${AI_CANVAS_FFMPEG_COMMAND:ffmpeg}
+    local-models: []
+  ppt:
+    ppt-master:
+      # agent = Claude CLI + ppt-master Skill（对客默认）；process/http = 旧 worker（仅兼容）
+      mode: ${PPT_MASTER_MODE:agent}
+      # No repository default: set PPT_MASTER_BASE_URL / PPT_MASTER_REPO per machine.
+      base-url: ${PPT_MASTER_BASE_URL:}
+      repo-root: ${PPT_MASTER_REPO:}
+      python: ${PPT_MASTER_PYTHON:python}
+      work-dir: ${PPT_MASTER_WORK_DIR:./data/ppt-master-jobs}
+      model: ${PPT_MASTER_MODEL:}
+      generate-timeout: ${PPT_MASTER_GENERATE_TIMEOUT:45m}
+      # 当前阶段允许后台配置 Key；没有 Key 时只允许显式离线布局。
+      allow-offline: ${PPT_MASTER_ALLOW_OFFLINE:false}
+      # autoImg 时 Worker 内并发生图数
+      image-concurrency: ${PPT_MASTER_IMAGE_CONCURRENCY:2}
+      job-concurrency: ${PPT_MASTER_JOB_CONCURRENCY:2}
+      job-queue-size: ${PPT_MASTER_JOB_QUEUE_SIZE:32}
+      claude-bin: ${PPT_MASTER_CLAUDE_BIN:claude}
+      agent-model: ${PPT_MASTER_AGENT_MODEL:sonnet}
+      agent-base-url: ${PPT_MASTER_AGENT_BASE_URL:}
+      agent-auth-token: ${PPT_MASTER_AGENT_AUTH_TOKEN:}
+      deck-templates-root: ${PPT_MASTER_DECK_TEMPLATES_ROOT:}
+      beauty-stage-timeout: ${PPT_MASTER_BEAUTY_STAGE_TIMEOUT:8m}
+      # 恢复扫描：重启后把还停在 queued 的任务重新提交，把租约过期的在跑任务判失败。
+      # 关掉它就退回「只在进程内存里排队」——重启即卡死，别关。
+      recovery-enabled: ${PPT_MASTER_RECOVERY_ENABLED:true}
+      recovery-interval: ${PPT_MASTER_RECOVERY_INTERVAL:30s}
+      recovery-initial-delay: ${PPT_MASTER_RECOVERY_INITIAL_DELAY:15s}
+      recovery-batch-size: ${PPT_MASTER_RECOVERY_BATCH:20}
+      # 正常建单几秒内就会被领取；超过这个时间还停在 queued，说明提交那一步丢了。
+      queued-stale-after: ${PPT_MASTER_QUEUED_STALE_AFTER:2m}
+      # 超过这个时长的 queued 不再复活：部署当天不能把几天前的任务一起跑起来。
+      queued-max-age: ${PPT_MASTER_QUEUED_MAX_AGE:24h}
+      # 必须大于 generate-timeout（45m）：一次缓慢的上游调用期间没有进度写入，
+      # 租约短于它就会把正常运行的任务误判成中断。
+      lease-ttl: ${PPT_MASTER_LEASE_TTL:90m}
+    estimate:
+      base-points: ${PPT_ESTIMATE_BASE:8}
+      per-slide-points: ${PPT_ESTIMATE_PER_SLIDE:0}
+      # 按预估插图张数计费（light≈20% / mid≈40% / heavy≈65% 页数）
+      auto-img-points: ${PPT_ESTIMATE_AUTO_IMG:2}
+      web-search-points: ${PPT_ESTIMATE_WEB_SEARCH:1}
+  document:
+    # LibreOffice 可执行文件。空白 = 按顺序查找：内置候选路径 → 系统 PATH 上的 soffice。
+    # 服务端部署三种情况：
+    #   1) 容器/发行版包（apt install libreoffice）：不用配，PATH 能查到；
+    #   2) 便携版解压：配绝对路径，例如 /opt/libreoffice/program/soffice；
+    #   3) 没有引擎：能力清单回 rendererAvailable=false，页面自动置灰这 4 个转换，不报错。
+    libreoffice-path: ${LIBREOFFICE_PATH:}
+    # PDFBox 生成 PDF（水印、文本转 PDF）要嵌入中文字体。空白 = 先用打包的
+    # fonts/document-cn.ttf，再找系统字体。**容器里装 LibreOffice 不会带中文字体**
+    # （只依赖 fonts-opensymbol），务必确认这里有值，否则水印会变成 ????
+    font-path: ${DOC_PDF_FONT_PATH:}
+    # 单次转换上限。一份 200 页的 Word 在本机约 20-40 秒；超过这个时间按卡死处理并杀掉进程。
+    convert-timeout-seconds: ${DOC_CONVERT_TIMEOUT_SECONDS:120}
+    # 同时允许几个转换进程。每个 soffice 常驻 100MB+，并发太高会把机器拖垮。
+    # 容器里按内存配额调整：1GB 内存建议 1，2GB 建议 2。
+    convert-parallelism: ${DOC_CONVERT_PARALLELISM:2}
+  # 通用任务队列（副作用型任务：删文件、发通知、补偿）。业务与消息同事务，回滚就不会有消息。
+  # 处理器跑在独立线程池里，租约不会自动续期 —— 分钟级的活儿别塞进来。
+  queue:
+    enabled: ${QUEUE_ENABLED:true}
+    poll-interval: ${QUEUE_POLL_INTERVAL:2s}
+    initial-delay: ${QUEUE_INITIAL_DELAY:10s}
+    batch-size: ${QUEUE_BATCH_SIZE:10}
+    # 单轮最多连续领几批。只领一批时吞吐被钉在 batch-size / poll-interval（默认 5 条/秒），
+    # 积压时恢复速度就是这个值；连续领几批用来追赶，轮数封顶避免一轮占住调度线程太久。
+    max-batches-per-sweep: ${QUEUE_MAX_BATCHES_PER_SWEEP:5}
+    lease-ttl: ${QUEUE_LEASE_TTL:10m}
+    max-attempts: ${QUEUE_MAX_ATTEMPTS:5}
+    retry-base-delay: ${QUEUE_RETRY_BASE_DELAY:30s}
+    retry-max-delay: ${QUEUE_RETRY_MAX_DELAY:30m}
+    worker-threads: ${QUEUE_WORKER_THREADS:2}
+    worker-queue-size: ${QUEUE_WORKER_QUEUE_SIZE:64}
+    # 指标刷新：每 30 秒查一次库，把积压深度与最老待办年龄写进内存；抓取端读的是那几个数。
+    # 别把它调成秒级 —— 抓取频率不由我们控制，指标不该变成一份固定数据库负载。
+    metrics-refresh: ${QUEUE_METRICS_REFRESH:30s}
+    metrics-initial-delay: ${QUEUE_METRICS_INITIAL_DELAY:20s}
+  # 打开后把两类「跨实例才有意义」的状态放进 Redis：
+  #   * 限流计数（否则每个副本各算一份，额度变成 limit × 副本数）；
+  #   * 进行中的生成请求（否则「停止生成」打到别的副本上只能 404）。
+  # 单实例部署保持 false，退回进程内实现；本地开发与整套测试都不需要 Redis。
+  redis:
+    enabled: ${REDIS_ENABLED:false}
+  new-api:
+    # Local development escape hatch: when false, user AI traffic uses the static
+    # app.llm.api-key instead of a per-user relay key. Keep true anywhere usage is billed
+    # per account. See UserRelayCredentialResolver.
+    enabled: ${NEW_API_ENABLED:true}
+    # No repository default: set NEW_API_BASE_URL (root, no /v1) per deployment.
+    base-url: ${NEW_API_BASE_URL:}
+    # Base64 encoded 32-byte AES-256-GCM key for PAT and relay credentials at rest.
+    encryption-key: ${NEW_API_ENCRYPTION_KEY:}
+    token-name-prefix: ${NEW_API_TOKEN_NAME_PREFIX:hub}
+    group: ${NEW_API_GROUP:default}
+    # 可选：模型广场同步专用的只读账号。New API 把 GET /api/pricing 挂在 pricing 导航模块下，
+    # 该模块开启 requireAuth 之后匿名请求直接 401，同步会一直失败。填上这两个值，同步先登录
+    # 拿会话令牌再带 Authorization 调广场；留空则保持匿名请求（旧行为不变）。
+    # ⚠️ 返回哪些模型由这个账号的分组决定：New API 会按调用者的可用分组过滤广场，
+    #    所以同步账号在 default 分组就看不到仅高端分组可用的模型。要用一个分组覆盖全部要
+    #    对外发布的分组的账号（或被授予了这些可用分组），否则就要按分组各同步一次。
+    catalog-username: ${NEW_API_CATALOG_USERNAME:}
+    catalog-password: ${NEW_API_CATALOG_PASSWORD:}
+    # 可选：New API 管理员账号，只用于「注销后把远端用户行物理删掉，释放用户名」。
+    # New API 自助注销只打软删标记，之后 model.CheckUserExistOrDeleted 会让该用户名永久不可再用
+    # （"Username already exists or has been deleted"），只有管理员接口 DELETE /api/user/{id}
+    # 能真正删行。留空则保持原行为：账号照常注销，用户名仍被占用。
+    # 该接口要求密码级安全验证，所以这里必须存明文密码；请只填一个专用于此的管理员账号。
+    admin-username: ${NEW_API_ADMIN_USERNAME:}
+    admin-password: ${NEW_API_ADMIN_PASSWORD:}
+    login-timeout: ${NEW_API_LOGIN_TIMEOUT:15s}
+    user-access-token-timeout: ${NEW_API_USER_ACCESS_TOKEN_TIMEOUT:15s}
+    token-management-timeout: ${NEW_API_TOKEN_MANAGEMENT_TIMEOUT:15s}
+    catalog-timeout: ${NEW_API_CATALOG_TIMEOUT:15s}
+    catalog-sync-on-startup: ${NEW_API_CATALOG_SYNC_ON_STARTUP:true}
+    # Keep the local model snapshot aligned with the anonymous public model plaza.
+    # Fixed-delay polling means a slow New API response never causes overlapping refreshes.
+    catalog-sync-enabled: ${NEW_API_CATALOG_SYNC_ENABLED:true}
+    catalog-sync-interval-millis: ${NEW_API_CATALOG_SYNC_INTERVAL_MS:300000}
+    catalog-sync-initial-delay-millis: ${NEW_API_CATALOG_SYNC_INITIAL_DELAY_MS:300000}
+    usage-timeout: ${NEW_API_USAGE_TIMEOUT:15s}
+    # Local quota display constants; New API account state is not read with a global credential.
+    quota-per-unit: ${NEW_API_QUOTA_PER_UNIT:500000}
+    usd-exchange-rate: ${NEW_API_USD_EXCHANGE_RATE:7.3}
+    # How long a persisted usage snapshot may stand in for a live /api/usage/token/ call.
+    # That endpoint shares New API's critical limiter (20 requests / 20 minutes per IP) with
+    # /api/user/login, so querying it on every AI call runs the budget out mid-generation.
+    # 0 disables the cache and restores the query-every-time behaviour.
+    usage-cache-ttl: ${NEW_API_USAGE_CACHE_TTL:3m}
+    # 前端在「扣费 / 退款」这类刚刚动过钱的时刻会带 ?refresh=true 强刷余额；
+    # 快照必须至少这么旧才允许穿透 TTL，否则轮询式的刷新会把上面的限额吃光。
+    usage-force-refresh-interval: ${NEW_API_USAGE_FORCE_REFRESH_INTERVAL:10s}
+    provisioning-lease: ${NEW_API_PROVISIONING_LEASE:2m}
+    retry-delay: ${NEW_API_RETRY_DELAY:30s}
+    # 注销时远端删除被限流（429 / 5xx / 连不上）之后的续删任务。
+    # 本地注销永远成功；上游只是「此刻忙」的那一次会落到 newapi_account_deletion_tasks，
+    # 由后台定时器在限流窗口过去（关键接口 20 次 / 20 分钟）之后接着删。
+    # 关掉 = 回到旧行为：远端账号留在上游，只写一行 warn。
+    deletion-retry-enabled: ${NEW_API_DELETION_RETRY_ENABLED:true}
+    # 扫描间隔（fixedDelay，跑完一轮再等）与单轮最多处理的条数。
+    deletion-sweep-interval-millis: ${NEW_API_DELETION_SWEEP_INTERVAL_MS:30000}
+    deletion-sweep-batch-size: ${NEW_API_DELETION_SWEEP_BATCH_SIZE:20}
+    # 重试间隔按指数增长：initial × 2^n，封顶 max。第一次 60 秒后再来，之后 2、4、8、16 分钟，
+    # 到 20 分钟封顶 —— 立即重试只会再吃一个 429，把次数白白耗在窗口里面。
+    deletion-retry-initial-delay: ${NEW_API_DELETION_RETRY_INITIAL_DELAY:60s}
+    deletion-retry-max-delay: ${NEW_API_DELETION_RETRY_MAX_DELAY:20m}
+    # 超过这个次数仍失败就标 FAILED 留给人工（默认节奏约 2 小时，够熬过持续被压的限流）。
+    deletion-retry-max-attempts: ${NEW_API_DELETION_RETRY_MAX_ATTEMPTS:10}
+    # 一次认领的租约长度；实例中途挂掉，租约过期后别的实例接手。
+    deletion-task-lease: ${NEW_API_DELETION_TASK_LEASE:5m}
+    # Explicit model-key → CHAT|IMAGE|VIDEO|AUDIO. Wins over keyword heuristics on sync create,
+    # and overwrites existing model_type on refresh when the key is listed here.
+    model-type-overrides: {}
+
+logging:
+  # 日志目录。logback-spring.xml 从这里取，容器里指到挂载卷，否则容器重建即丢。
+  # 五个文件：backend / backend-error / startup / sql（见 logback-spring.xml 顶部说明）。
+  file:
+    path: ${LOG_DIR:./logs}
+  level:
+    com.hub.backend: INFO
+    # SQL 与绑定参数的级别不写在这里：由 app.sql-log.enabled 在启动时动态注入
+    # （SqlLogEnvironmentPostProcessor），否则 yml 里没法用一个布尔开关控制另一处属性的值。

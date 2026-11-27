@@ -1,0 +1,11 @@
+-- Origin the finished video file is fetched from, when it is not the submit host.
+--
+-- xAI-style task plugins answer the status call with a host-less path
+-- ("/v1/videos/{id}/content"). That path is relative to the supplier that produced the file, not
+-- to the relay the caller submitted to, and a relay whose artifact route cannot hand the bytes back
+-- leaves nothing to download from. Recording the supplier origin per provider keeps that host in
+-- data instead of the code: switching suppliers is one row, not a redeploy.
+--
+-- NULL keeps the previous behaviour exactly — the relative path is resolved against the submit base
+-- (the New API relay).
+ALTER TABLE llm_providers ADD COLUMN video_download_base_url VARCHAR(1024) NULL AFTER base_url;

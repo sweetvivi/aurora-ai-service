@@ -1,0 +1,125 @@
+{
+  "source": "https://github.com/momozi1996/awesome-ai-persona-skills",
+  "publishedAt": "2026-10-16 00:00:00",
+  "categories": [
+    {
+      "folder": "DirectorAgents-1/directors",
+      "pattern": "*.md",
+      "recursive": false,
+      "key": "director-personas",
+      "name": "导演思维",
+      "description": "从世界著名导演的创作观、镜头语言和代表作出发，用于电影构思、影像分析与故事创作。",
+      "classify": "创作人格",
+      "childClassify": "导演思维",
+      "tag": "电影导演",
+      "sort": 80,
+      "format": "director",
+      "keyPrefix": "director-",
+      "descriptionTemplate": "以{name}的创作观、镜头语言和代表作，辅助电影构思、影像分析与故事创作。",
+      "descriptionThemesTemplate": "以{name}的创作人格为核心，聚焦：{themes}。",
+      "chatPrologueTemplate": "我是{name}。把你的故事、画面或创作难题交给我，我们按电影的节奏来拆解。",
+      "questionTemplates": [
+        "如果要拍好一场「雨夜相遇」，你会如何调度光线、声音和走位？",
+        "帮我用你的电影语言分析一个角色的内心转折。",
+        "把你的一部代表作拆成开场、中段和结尾，讲讲节奏设计。"
+      ],
+      "keyOverrides": {
+        "安德烈·塔可夫斯基.md": "director-andrei-tarkovsky",
+        "陈凯歌.md": "director-chen-kaige",
+        "陈可辛.md": "director-peter-chan",
+        "大卫·芬奇.md": "director-david-fincher",
+        "杜琪峰.md": "director-johnnie-to",
+        "费德里科·费里尼.md": "director-federico-fellini",
+        "奉俊昊.md": "director-bong-joon-ho",
+        "弗朗西斯·福特·科波拉.md": "director-francis-ford-coppola",
+        "宫崎骏.md": "director-hayao-miyazaki",
+        "黑泽明.md": "director-akira-kurosawa",
+        "侯孝贤.md": "director-hou-hsiao-hsien",
+        "贾樟柯.md": "director-jia-zhangke",
+        "姜文.md": "director-jiang-wen",
+        "克里斯托弗·诺兰.md": "director-christopher-nolan",
+        "昆汀·塔伦蒂诺.md": "director-quentin-tarantino",
+        "李安.md": "director-ang-lee",
+        "路易斯·布努埃尔.md": "director-luis-bunuel",
+        "米开朗基罗·安东尼奥尼.md": "director-michelangelo-antonioni",
+        "朴赞郁.md": "director-park-chan-wook",
+        "史蒂文·斯皮尔伯格.md": "director-steven-spielberg",
+        "是枝裕和.md": "director-hirokazu-koreeda",
+        "王家卫.md": "director-wong-kar-wai",
+        "吴宇森.md": "director-john-woo",
+        "伍迪·艾伦.md": "director-woody-allen",
+        "小津安二郎.md": "director-yasujiro-ozu",
+        "徐克.md": "director-tsui-hark",
+        "杨德昌.md": "director-edward-yang",
+        "英格玛·伯格曼.md": "director-ingmar-bergman",
+        "詹姆斯·卡梅隆.md": "director-james-cameron",
+        "张艺谋.md": "director-zhang-yimou",
+        "周星驰.md": "director-stephen-chow"
+      }
+    },
+    {
+      "folder": "Novelists",
+      "pattern": "SKILL.md",
+      "recursive": true,
+      "excludePaths": [
+        "Novelists/SKILL.md"
+      ],
+      "key": "writer-personas",
+      "name": "作家思维",
+      "description": "以作家的语言、叙事方法和创作观进行小说、散文与内容写作。",
+      "classify": "创作人格",
+      "childClassify": "作家思维",
+      "tag": "文学创作",
+      "sort": 90,
+      "format": "skill",
+      "chatPrologueTemplate": "我是{name}。告诉我你正在写什么，我们从人物、语言和叙事结构聊起。",
+      "questionTemplates": [
+        "我想写一个关于「故乡」的故事，你会从哪里落笔？",
+        "帮我塑造一个既真实又有矛盾感的主角。",
+        "用你的语言风格改写下面这段文字。"
+      ]
+    },
+    {
+      "folder": "zimeiti",
+      "pattern": "SKILL.md",
+      "recursive": true,
+      "key": "media-personas",
+      "name": "自媒体人格",
+      "description": "模拟 AI 与科技领域创作者、媒体和博主的内容判断与表达方式。",
+      "classify": "内容行业",
+      "childClassify": "自媒体人格",
+      "tag": "AI内容创作",
+      "sort": 100,
+      "format": "skill",
+      "chatPrologueTemplate": "我是{name}。把你关注的选题、产品或行业变化发给我，我们一起找角度、拆信息、成内容。",
+      "questionTemplates": [
+        "把这个 AI 行业热点变成一篇有观点的深度内容。",
+        "给我一个适合短视频的选题角度和开头。",
+        "拆解这条产品发布背后的行业信号。"
+      ]
+    },
+    {
+      "folder": "tianya-gods-framework/gods",
+      "pattern": "*.md",
+      "recursive": false,
+      "excludePaths": [
+        "tianya-gods-framework/gods/README.md",
+        "tianya-gods-framework/gods/dangnianmingyue.md"
+      ],
+      "key": "tianya-personas",
+      "name": "天涯大神",
+      "description": "来自天涯社区经典作者的社会观察、权谋分析、经济判断与都市叙事人格。",
+      "classify": "社会观察",
+      "childClassify": "天涯大神",
+      "tag": "社会观察",
+      "sort": 110,
+      "format": "skill",
+      "chatPrologueTemplate": "我是{name}。把你想看清的现象或趋势说出来，我们透过表象聊聊底层逻辑。",
+      "questionTemplates": [
+        "怎么看最近一个社会热点背后的结构性原因？",
+        "帮我把复杂的局势拆成几个关键变量。",
+        "用一个尖锐但理性的角度评价这件事。"
+      ]
+    }
+  ]
+}

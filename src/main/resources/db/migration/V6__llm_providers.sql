@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS llm_providers (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    provider_key VARCHAR(128) NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    protocol VARCHAR(64) NOT NULL,
+    base_url VARCHAR(1024) NOT NULL,
+    endpoint_path VARCHAR(255) NULL,
+    api_version VARCHAR(64) NULL,
+    auth_type VARCHAR(64) NOT NULL,
+    credential_ref VARCHAR(255) NOT NULL,
+    credential_fingerprint CHAR(64) NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+    sort_order INT NOT NULL DEFAULT 0,
+    metadata_json LONGTEXT NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_llm_providers_key (provider_key),
+    KEY idx_llm_providers_status_protocol (status, protocol),
+    KEY idx_llm_providers_updated (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

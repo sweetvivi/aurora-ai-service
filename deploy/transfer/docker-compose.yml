@@ -1,0 +1,167 @@
+name: hub-test
+
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-mysql:8.4}
+    container_name: hub-test-mysql
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?MYSQL_DATABASE is required}
+      MYSQL_USER: ${MYSQL_USER:?MYSQL_USER is required}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - data
+
+  # New API lives in this compose project, so it has to be declared here: the deploy runs
+  # `docker compose up -d --remove-orphans`, and a service that is running but missing from this
+  # file is treated as an orphan and deleted. Its data is in the named volume new-api-data.
+  new-api:
+    image: ${NEW_API_IMAGE:-docker.m.daocloud.io/calciumion/new-api:v1.0.0-rc.45}
+    container_name: hub-test-new-api
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      SESSION_SECRET: ${NEW_API_SESSION_SECRET:?NEW_API_SESSION_SECRET is required}
+      CRYPTO_SECRET: ${NEW_API_CRYPTO_SECRET:?NEW_API_CRYPTO_SECRET is required}
+      SESSION_COOKIE_SECURE: "false"
+      CRITICAL_RATE_LIMIT_ENABLE: "true"
+      CRITICAL_RATE_LIMIT: "10000"
+      CRITICAL_RATE_LIMIT_DURATION: "60"
+      SQLITE_PATH: "/data/one-api.db?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_txlock=immediate"
+    ports:
+      - "3000:3000"
+    volumes:
+      - new-api-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - edge
+
+  backend:
+    image: hub-test-backend:${BACKEND_VERSION:?BACKEND_VERSION is required}
+    container_name: hub-test-backend
+    build:
+      context: ./source/backend-service
+      dockerfile: Dockerfile
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      SPRING_PROFILES_ACTIVE: mysql
+      SERVER_PORT: 8080
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${MYSQL_DATABASE}
+      DB_USERNAME: ${MYSQL_USER}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?AUTH_JWT_SECRET is required}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?ADMIN_API_KEY is required}
+      NEW_API_BASE_URL: ${NEW_API_BASE_URL:?NEW_API_BASE_URL is required}
+      NEW_API_ENCRYPTION_KEY: ${NEW_API_ENCRYPTION_KEY:?NEW_API_ENCRYPTION_KEY is required}
+      NEW_API_TOKEN_NAME_PREFIX: ${NEW_API_TOKEN_NAME_PREFIX:-hub}
+      NEW_API_GROUP: ${NEW_API_GROUP:-default}
+      # 可选：模型广场开启「需登录」后，同步专用只读账号（分组决定能看到哪些模型）。
+      NEW_API_CATALOG_USERNAME: ${NEW_API_CATALOG_USERNAME:-}
+      NEW_API_CATALOG_PASSWORD: ${NEW_API_CATALOG_PASSWORD:-}
+      AUTH_NEW_API_ACCOUNT_PROVISIONING_ENABLED: ${AUTH_NEW_API_ACCOUNT_PROVISIONING_ENABLED:-true}
+      AUTH_EMAIL_VERIFICATION_REGISTER_MODE: ${AUTH_EMAIL_VERIFICATION_REGISTER_MODE:-AUTO}
+      AUTH_EMAIL_VERIFICATION_LOGIN_REQUIRED: ${AUTH_EMAIL_VERIFICATION_LOGIN_REQUIRED:-false}
+      LLM_BASE_URL: ${LLM_BASE_URL:?LLM_BASE_URL is required}
+      LLM_VIDEO_DOWNLOAD_API_KEY: ${LLM_VIDEO_DOWNLOAD_API_KEY:-}
+      STORAGE_LOCAL_ROOT: /app/data/uploads
+      STORAGE_PUBLIC_ROOT: /app/data/public
+      TRUST_FORWARDED_FOR: "false"
+      TRUST_USER_HEADER: "false"
+      # 日志落挂载卷，容器重建不丢。文件：backend / backend-error / startup / sql。
+      LOG_DIR: /app/logs
+      # 生产显式关掉 SQL 日志：绑定参数是明文且量大。临时排查时改 true 重启即可。
+      SQL_LOG_ENABLED: ${SQL_LOG_ENABLED:-false}
+      AUDIT_LOG_ENABLED: ${AUDIT_LOG_ENABLED:-true}
+      # 访问日志保留 7 天，超期由每小时运行的清理任务物理删除（DELETE，不可恢复）。
+      # 审计表是另一套保留期，见 AUDIT_LOG_RETENTION_DAYS（默认 180 天）。
+      REQUEST_LOG_RETENTION_DAYS: ${REQUEST_LOG_RETENTION_DAYS:-7}
+      AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-180}
+      # 控制台静音：容器日志已经进文件，再往 stdout 打一份只是重复占用 I/O。
+      # 需要看 docker logs 时改回 DEBUG 重启。
+      LOG_CONSOLE_LEVEL: ${LOG_CONSOLE_LEVEL:-OFF}
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65.0 -XX:+ExitOnOutOfMemoryError
+    ports:
+      - "18081:8080"
+    volumes:
+      - uploads:/app/data/uploads
+      - public:/app/data/public
+      - logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 60s
+    stop_grace_period: 30s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - edge
+      - data
+
+  frontend:
+    image: hub-test-frontend:${FRONTEND_VERSION:?FRONTEND_VERSION is required}
+    container_name: hub-test-frontend
+    build:
+      context: ./source/web-app
+      dockerfile: Dockerfile
+    ports:
+      - "14173:14173"
+    volumes:
+      - ./tls:/etc/nginx/tls:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 15s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - edge
+
+networks:
+  edge:
+  data:
+    internal: true
+
+volumes:
+  mysql-data:
+  uploads:
+  public:
+  logs:
+  new-api-data:
+    name: hub-test_new-api-data

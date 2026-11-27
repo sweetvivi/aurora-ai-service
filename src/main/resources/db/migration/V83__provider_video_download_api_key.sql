@@ -1,0 +1,16 @@
+-- Key that can fetch a finished video from video_download_base_url.
+--
+-- video_download_base_url (V78) made the supplier origin operator data, but the key for that
+-- origin had nowhere to live: the catalogue sync rewrites the relay-owned supplier row on every
+-- refresh and sets api_key to NULL, so a key written there is gone within one sync interval and
+-- every subsequent download silently falls back to the caller's relay key -- which the supplier
+-- host rejects with 401. The result was a deployment that only worked while an environment
+-- variable was set.
+--
+-- This column is not touched by NewApiCatalogSyncService.ensurePublicProvider(), so the origin and
+-- the key that belongs to it are stored together, on the same row, and neither needs a redeploy to
+-- change.
+--
+-- NULL keeps the previous behaviour exactly: fall back to app.llm.video-download-api-key, then to
+-- the submit key.
+ALTER TABLE llm_providers ADD COLUMN video_download_api_key TEXT NULL AFTER video_download_base_url;

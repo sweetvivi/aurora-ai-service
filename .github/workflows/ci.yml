@@ -1,0 +1,88 @@
+name: Backend CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # RedisRateLimiterTest / RedisChatCoordinationTest 连的是真实 127.0.0.1:6379：
+    # 它们用 @SpringBootTest(properties = "app.redis.enabled=true") 起整个上下文，
+    # 而上下文加载发生在 @BeforeEach 之前，所以测试里那句 assumeTrue(reachable(), ...)
+    # 来不及生效 —— 没有 Redis 时上下文直接抛 RedisConnectionException，用例全红。
+    # （2026-11-12 push 后 CI 连续失败，11 个 error 全是这个原因。）
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+
+      # 先单独确认 Redis 真的可用，免得它起不来时把 11 个测试错误伪装成代码问题。
+      # 不用 redis-cli：ubuntu-latest 不保证预装它。改用 bash 内置的 /dev/tcp 发 PING。
+      # 注意 reply 实际是 "+PONG\r"（Redis 用 CRLF，read 只吃 \n），所以用 case 通配匹配，
+      # 不要写 [ "$reply" = "+PONG" ]；也不要改用 head -c N（等不满字节数会一直挂住）。
+      - name: Verify Redis is reachable
+        shell: bash
+        run: |
+          for i in $(seq 1 20); do
+            if exec 3<>/dev/tcp/127.0.0.1/6379 2>/dev/null; then
+              printf 'PING\r\n' >&3
+              if read -r -t 2 -u 3 reply; then
+                exec 3<&- 3>&-
+                case "$reply" in
+                  +PONG*) echo "Redis is up"; exit 0 ;;
+                esac
+              else
+                exec 3<&- 3>&-
+              fi
+            fi
+            echo "waiting for Redis... ($i)"
+            sleep 2
+          done
+          echo "::error::Redis did not become ready on 127.0.0.1:6379"
+          exit 1
+
+      - name: Verify with tests
+        run: |
+          chmod +x mvnw
+          ./mvnw -B -ntp verify
+
+      # 产物只在手动触发（workflow_dispatch）时上传。
+      # 每次 push 都上传 target/*.jar（fat jar 约 89MB，压缩率极低）会在几天内打满 Actions 存储配额，
+      # 2026-11-06 就因此 CI 全红（Failed to CreateArtifact: Artifact storage quota has been hit）。
+      # 部署走镜像构建时直接拷 target 里的 jar，不依赖这个 artifact；确需下载时手动跑一次即可。
+      - name: Upload backend artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-jar
+          path: target/*.jar
+          if-no-files-found: error
+          retention-days: 3

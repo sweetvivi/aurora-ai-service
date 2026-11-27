@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  日志出口划分（五个文件 + 控制台）：
+
+    backend.log        全量日志，排查的主入口
+    backend-error.log  只收 WARN/ERROR，方便告警与快扫
+    startup.log        启动相关：Spring Boot 自身的启动过程 + StartupReporter 的启动摘要
+    sql.log            SQL 语句与绑定参数，由 app.sql-log.enabled 开关控制（默认关）
+    access（表）        每个 HTTP 请求一行，不在这里，见 request_logs
+    audit（表）         关键数据变更，不在这里，见 audit_logs
+
+  为什么启动日志要单独一个文件：一次启动会打出几十行框架日志（Tomcat 端口、Flyway 版本、
+  JPA 校验、Bean 装配），混在业务日志里既淹没业务，又让「这次到底是用哪份配置起来的」
+  这件事难以回溯。单独成文之后，出问题先看 startup.log 一眼就能确认 profile、端口、数据源、
+  迁移版本，不用在几万行业务日志里捞。
+
+  注意 profile 的用法：本项目 `spring.profiles.default=mysql`，也就是**本地开发和生产都用
+  mysql profile**，所以不能用 profile 名字来区分「要不要打印到控制台」。控制台改由
+  app.log.console-level 控制（阈值 OFF 即静音，容器里用 docker logs 时保持打开）。
+
+  每行都带 [hostname:pid] 实例标识。多副本部署时两个进程的日志长得一模一样：同一个 logger、
+  同一个线程名（hub-scheduler-1），PID 还都从容器里的 1 开始。没有这一列就没法判断
+  「这条定时任务是谁跑的」—— 而这正是排查重复执行、ShedLock 有没有生效时第一个要看的东西。
+  标识由 BackendServiceApplication 在 Spring 启动前写入系统属性 app.instance，
+  Spring 上下文之外（测试、工具类直跑）取不到时退回 local。
+-->
+<configuration>
+
+    <!-- 日志目录：与 application.yml 的 logging.file.path 同一个来源，容器里指到挂载卷。 -->
+    <springProperty scope="context" name="LOG_DIR" source="logging.file.path" defaultValue="./logs"/>
+    <springProperty scope="context" name="APP_NAME" source="spring.application.name" defaultValue="backend"/>
+    <!-- OFF 时控制台静音；容器部署可设 -Dapp.log.console-level=OFF。 -->
+    <springProperty scope="context" name="CONSOLE_LEVEL" source="app.log.console-level" defaultValue="DEBUG"/>
+    <!-- 实例标识，可用 APP_INSTANCE 覆盖（默认 hostname:pid）。 -->
+    <springProperty scope="context" name="INSTANCE" source="app.instance" defaultValue="local"/>
+
+    <!-- traceId / uid / siteId 由 TraceIdFilter 与 CurrentUserResolver 写入 MDC。
+         没有请求上下文（启动期、后台线程）时显示 "-"，一眼能看出这条日志不归属于任何请求。 -->
+    <property name="PATTERN"
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:--}] [%X{uid:--}] [${INSTANCE}] [%thread] %logger{40} : %msg%n"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>${CONSOLE_LEVEL}</level>
+        </filter>
+        <encoder>
+            <pattern>${PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- 全量日志。100MB 或一天一切，留 30 天，总量 3GB 兜底，防日志把磁盘写满。 -->
+    <appender name="APP_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/backend.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/backend.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>100MB</maxFileSize>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>3GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- 错误单独一份：告警采集只需要盯这个文件，不必去全量日志里过滤。 -->
+    <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/backend-error.log</file>
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>WARN</level>
+        </filter>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/backend-error.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>60</maxHistory>
+            <totalSizeCap>1GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- 启动日志。不按天滚动而是按大小（一次启动通常只有几十行），留最近 10 份便于对比两次启动的差异。 -->
+    <appender name="STARTUP_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/startup.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/startup.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>8MB</maxFileSize>
+            <maxHistory>10</maxHistory>
+            <totalSizeCap>80MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!--
+      SQL 日志。级别由 app.sql-log.enabled 在启动时通过 logging.level.* 注入（见
+      SqlLogEnvironmentPostProcessor）：关闭时 logger 停在 INFO，Hibernate 的 DEBUG 语句不会输出，
+      文件保持为空，没有额外开销。
+      绑定参数（org.hibernate.orm.jdbc.bind）以 TRACE 输出，落在同一个文件里，语句和参数才能对得上。
+    -->
+    <appender name="SQL_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/sql.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/sql.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>7</maxHistory>
+            <totalSizeCap>500MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:--}] [${INSTANCE}] %msg%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!--
+      启动期日志双写：STARTUP_FILE + 父级（后端文件与控制台）。
+      additivity 保持 true 是有意的——启动失败时的异常栈必须也能在 backend.log 里看到，
+      否则「容器起不来」这类问题会只剩一个 startup.log。
+    -->
+    <logger name="org.springframework.boot" level="INFO" additivity="true">
+        <appender-ref ref="STARTUP_FILE"/>
+    </logger>
+
+    <!-- StartupReporter 专用通道：结构化启动摘要，只进 startup.log 与控制台。 -->
+    <logger name="STARTUP" level="INFO" additivity="false">
+        <appender-ref ref="STARTUP_FILE"/>
+        <appender-ref ref="CONSOLE"/>
+    </logger>
+
+    <!-- Hibernate / JDBC 的 SQL 只进 sql.log 与控制台，不污染 backend.log（一次请求几十条语句）。 -->
+    <logger name="org.hibernate.SQL" level="INFO" additivity="false">
+        <appender-ref ref="SQL_FILE"/>
+        <appender-ref ref="CONSOLE"/>
+    </logger>
+    <logger name="org.hibernate.orm.jdbc.bind" level="INFO" additivity="false">
+        <appender-ref ref="SQL_FILE"/>
+        <appender-ref ref="CONSOLE"/>
+    </logger>
+    <logger name="org.hibernate.orm.jdbc.extract" level="INFO" additivity="false">
+        <appender-ref ref="SQL_FILE"/>
+        <appender-ref ref="CONSOLE"/>
+    </logger>
+    <logger name="org.springframework.jdbc.core.JdbcTemplate" level="INFO" additivity="false">
+        <appender-ref ref="SQL_FILE"/>
+        <appender-ref ref="CONSOLE"/>
+    </logger>
+
+    <!-- Flyway 的迁移日志进启动文件：它决定了这次起来的是哪个版本的库。 -->
+    <logger name="org.flywaydb" level="INFO" additivity="true">
+        <appender-ref ref="STARTUP_FILE"/>
+    </logger>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="APP_FILE"/>
+        <appender-ref ref="ERROR_FILE"/>
+    </root>
+
+</configuration>

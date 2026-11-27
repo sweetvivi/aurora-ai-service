@@ -1,0 +1,80 @@
+{
+  "source": "ppt-master",
+  "templates": [
+    {
+      "templateId": "business-clean",
+      "name": "Business Clean",
+      "nameZh": "商务简约",
+      "category": "商务",
+      "description": "浅色背景和清晰信息层级，适合分析报告与工作总结。",
+      "preview": "/ppt-templates/ppt-master/business-clean.svg",
+      "master": "ppt-master://business-clean",
+      "scenes": ["通用", "商业计划", "分析报告", "工作总结"],
+      "layouts": [
+        "cover", "section", "title_content", "image_text", "editorial_split",
+        "two_column", "comparison", "three_card", "four_card", "metric_dashboard",
+        "timeline", "process_flow", "bar_chart", "line_chart", "table_summary",
+        "quote", "full_image", "image_grid", "summary", "closing"
+      ],
+      "layoutCount": 20
+    },
+    {
+      "templateId": "dark-tech",
+      "name": "Dark Tech",
+      "nameZh": "深色科技",
+      "category": "科技",
+      "description": "深色高对比视觉，适合科技、产品和路演内容。",
+      "preview": "/ppt-templates/ppt-master/dark-tech.svg",
+      "master": "ppt-master://dark-tech",
+      "scenes": ["通用", "商业计划", "演讲报告", "竞品分析"],
+      "layouts": [
+        "cover", "section", "title_content", "image_text", "editorial_split",
+        "two_column", "comparison", "three_card", "four_card", "metric_dashboard",
+        "timeline", "process_flow", "bar_chart", "line_chart", "table_summary",
+        "quote", "full_image", "image_grid", "summary", "closing"
+      ],
+      "layoutCount": 20
+    },
+    {
+      "templateId": "fresh-modern",
+      "name": "Fresh Modern",
+      "nameZh": "清新现代",
+      "category": "现代",
+      "description": "清爽青绿色调，适合教育、总结和内容分享。",
+      "preview": "/ppt-templates/ppt-master/fresh-modern.svg",
+      "master": "ppt-master://fresh-modern",
+      "scenes": ["通用", "教学课件", "工作总结", "演讲报告"],
+      "layouts": [
+        "cover", "section", "title_content", "image_text", "editorial_split",
+        "two_column", "comparison", "three_card", "four_card", "metric_dashboard",
+        "timeline", "process_flow", "bar_chart", "line_chart", "table_summary",
+        "quote", "full_image", "image_grid", "summary", "closing"
+      ],
+      "layoutCount": 20
+    },
+    {
+      "templateId": "green-fresh-courseware",
+      "name": "Green Fresh Courseware",
+      "nameZh": "绿色清新课件",
+      "category": "教育",
+      "description": "浅绿色背景和柔和卡片结构，适合教学、培训与产品教程。",
+      "preview": "/ppt-templates/ppt-master/green-fresh-courseware.svg",
+      "master": "ppt-master://green-fresh-courseware",
+      "scenes": ["教学课件", "培训分享", "产品介绍", "工作总结"],
+      "layouts": ["cover", "section", "title_content", "image_text", "editorial_split", "two_column", "comparison", "three_card", "four_card", "metric_dashboard", "timeline", "process_flow", "bar_chart", "line_chart", "table_summary", "quote", "full_image", "image_grid", "summary", "closing"],
+      "layoutCount": 20
+    },
+    {
+      "templateId": "blue-business-text",
+      "name": "Blue Business Text",
+      "nameZh": "蓝白商务文字",
+      "category": "商务",
+      "description": "蓝白高对比和纯文字信息结构，适合产品介绍、汇报与商业计划。",
+      "preview": "/ppt-templates/ppt-master/blue-business-text.svg",
+      "master": "ppt-master://blue-business-text",
+      "scenes": ["产品介绍", "工作汇报", "商业计划", "分析报告"],
+      "layouts": ["cover", "section", "title_content", "image_text", "editorial_split", "two_column", "comparison", "three_card", "four_card", "metric_dashboard", "timeline", "process_flow", "bar_chart", "line_chart", "table_summary", "quote", "full_image", "image_grid", "summary", "closing"],
+      "layoutCount": 20
+    }
+  ]
+}

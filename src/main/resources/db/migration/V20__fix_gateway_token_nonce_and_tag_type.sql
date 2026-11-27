@@ -1,0 +1,3 @@
+ALTER TABLE user_gateway_tokens
+    MODIFY COLUMN key_nonce VARBINARY(12) NULL,
+    MODIFY COLUMN key_tag VARBINARY(16) NULL;

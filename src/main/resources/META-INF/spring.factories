@@ -1,0 +1,6 @@
+# 启动期钩子。EnvironmentPostProcessor 不会被组件扫描发现，只能在这里登记。
+#
+# SqlLogEnvironmentPostProcessor 需要在配置文件加载之后、日志系统初始化之前读到
+# app.sql-log.enabled，把 logging.level.* 注入环境——所以它只能在这个阶段注册。
+org.springframework.boot.env.EnvironmentPostProcessor=\
+com.hub.backend.common.logging.SqlLogEnvironmentPostProcessor

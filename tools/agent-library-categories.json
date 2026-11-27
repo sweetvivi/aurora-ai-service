@@ -1,0 +1,9 @@
+[
+  { "folder": "编程语言专家", "key": "programming", "name": "编程语言专家", "sort": 10 },
+  { "folder": "云架构与DevOps", "key": "cloud-devops", "name": "云架构与DevOps", "sort": 20 },
+  { "folder": "数据与AI", "key": "data-ai", "name": "数据与AI", "sort": 30 },
+  { "folder": "业务与产品", "key": "business-product", "name": "业务与产品", "sort": 40 },
+  { "folder": "安全与质量", "key": "security-quality", "name": "安全与质量", "sort": 50 },
+  { "folder": "移动与游戏开发", "key": "mobile-game", "name": "移动与游戏开发", "sort": 60 },
+  { "folder": "中文代理", "key": "chinese-agents", "name": "中文代理", "sort": 70 }
+]

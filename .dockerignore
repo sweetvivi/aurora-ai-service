@@ -1,0 +1,14 @@
+.git
+.github
+.vscode
+.workbuddy
+.codex
+target
+data
+logs
+*.log
+*.class
+*.iml
+.idea
+.env
+.env.*
